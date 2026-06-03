@@ -13,9 +13,14 @@ const unitList = document.getElementById("unitList");
 const totalCount = document.getElementById("totalCount");
 const reviewFilterButton = document.getElementById("reviewFilterButton");
 const csvButton = document.getElementById("csvButton");
+const backupButton = document.getElementById("backupButton");
+const importAddButton = document.getElementById("importAddButton");
+const importReplaceButton = document.getElementById("importReplaceButton");
+const importFileInput = document.getElementById("importFileInput");
 
 let units = loadUnits();
 let reviewOnly = false;
+let importMode = "add";
 
 function getToday() {
   const today = new Date();
@@ -203,6 +208,114 @@ function exportCsv() {
   URL.revokeObjectURL(url);
 }
 
+function exportJsonBackup() {
+  if (units.length === 0) {
+    alert("JSON出力する単元がありません。");
+    return;
+  }
+
+  const backupData = {
+    app: "unit-progress-app",
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    units
+  };
+
+  downloadTextFile(
+    `unit-progress-backup-${getToday()}.json`,
+    JSON.stringify(backupData, null, 2),
+    "application/json;charset=utf-8"
+  );
+}
+
+function startImport(mode) {
+  importMode = mode;
+  importFileInput.value = "";
+  importFileInput.click();
+}
+
+function importJsonBackup(event) {
+  const file = event.target.files[0];
+
+  if (!file) {
+    return;
+  }
+
+  const reader = new FileReader();
+
+  reader.onload = () => {
+    try {
+      const parsedData = JSON.parse(reader.result);
+      const importedUnits = normalizeImportedUnits(parsedData);
+
+      if (importedUnits.length === 0) {
+        alert("読み込める単元データがありません。");
+        return;
+      }
+
+      if (importMode === "replace") {
+        if (!confirm("現在のデータをすべて置き換えますか？")) {
+          return;
+        }
+
+        units = importedUnits;
+      } else {
+        units = [...units, ...importedUnits];
+      }
+
+      saveUnits();
+      render();
+      alert(`${importedUnits.length}件の単元データを読み込みました。`);
+    } catch (error) {
+      alert("JSONファイルを読み込めませんでした。ファイルを確認してください。");
+    }
+  };
+
+  reader.readAsText(file);
+}
+
+function normalizeImportedUnits(parsedData) {
+  const rawUnits = Array.isArray(parsedData) ? parsedData : parsedData.units;
+
+  if (!Array.isArray(rawUnits)) {
+    return [];
+  }
+
+  return rawUnits
+    .filter((unit) => unit && unit.date && unit.subject && unit.unitName && unit.status)
+    .map((unit, index) => ({
+      id: `${Date.now()}-${index}`,
+      date: String(unit.date),
+      subject: SUBJECTS.includes(unit.subject) ? unit.subject : "英語",
+      unitName: String(unit.unitName),
+      status: ["未着手", "学習中", "完了", "復習必要"].includes(unit.status) ? unit.status : "学習中",
+      understanding: clampUnderstanding(unit.understanding),
+      memo: String(unit.memo ?? "")
+    }));
+}
+
+function clampUnderstanding(value) {
+  const number = Number(value);
+
+  if (Number.isNaN(number)) {
+    return 3;
+  }
+
+  return Math.min(5, Math.max(1, number));
+}
+
+function downloadTextFile(fileName, text, type) {
+  const blob = new Blob([text], { type });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+
+  link.href = url;
+  link.download = fileName;
+  link.click();
+
+  URL.revokeObjectURL(url);
+}
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -220,6 +333,10 @@ function escapeCsv(value) {
 form.addEventListener("submit", addUnit);
 reviewFilterButton.addEventListener("click", toggleReviewFilter);
 csvButton.addEventListener("click", exportCsv);
+backupButton.addEventListener("click", exportJsonBackup);
+importAddButton.addEventListener("click", () => startImport("add"));
+importReplaceButton.addEventListener("click", () => startImport("replace"));
+importFileInput.addEventListener("change", importJsonBackup);
 
 resetForm();
 render();
