@@ -1,6 +1,44 @@
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js";
+import {
+  getAuth,
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  signOut
+} from "https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js";
+import {
+  addDoc,
+  collection,
+  deleteDoc,
+  doc,
+  getDocs,
+  getFirestore,
+  onSnapshot,
+  orderBy,
+  query,
+  serverTimestamp
+} from "https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js";
+
 const STORAGE_KEY = "unit-progress-app-v1";
 const SUBJECTS = ["英語", "数学", "理科", "国語", "社会"];
+const FAMILY_ID = "family-main";
 
+// Firebaseのプロジェクト作成後、この値をFirebase Consoleの設定値に置き換えます。
+const firebaseConfig = {
+  apiKey: "AIzaSyDRvHJAy4GuTolEwWpzOBdmt3DE890fLNM",
+  authDomain: "study-progress-app-6b08a.firebaseapp.com",
+  projectId: "study-progress-app-6b08a",
+  storageBucket: "study-progress-app-6b08a.firebasestorage.app",
+  messagingSenderId: "401897876994",
+  appId: "1:401897876994:web:2aa1f740b1f6cf6795c11b"
+};
+
+const syncStatus = document.getElementById("syncStatus");
+const loginForm = document.getElementById("loginForm");
+const emailInput = document.getElementById("emailInput");
+const passwordInput = document.getElementById("passwordInput");
+const loginButton = document.getElementById("loginButton");
+const logoutButton = document.getElementById("logoutButton");
+const uploadLocalButton = document.getElementById("uploadLocalButton");
 const form = document.getElementById("unitForm");
 const dateInput = document.getElementById("dateInput");
 const subjectInput = document.getElementById("subjectInput");
@@ -21,6 +59,14 @@ const importFileInput = document.getElementById("importFileInput");
 let units = loadUnits();
 let reviewOnly = false;
 let importMode = "add";
+let appMode = "local";
+let db = null;
+let auth = null;
+let currentUser = null;
+let unsubscribeUnits = null;
+let localUnitsBeforeCloud = [...units];
+
+const firebaseReady = Boolean(firebaseConfig.apiKey && firebaseConfig.projectId);
 
 function getToday() {
   const today = new Date();
@@ -57,11 +103,10 @@ function resetForm() {
   understandingInput.value = "3";
 }
 
-function addUnit(event) {
+async function addUnit(event) {
   event.preventDefault();
 
   const unit = {
-    id: Date.now().toString(),
     date: dateInput.value,
     subject: subjectInput.value,
     unitName: unitNameInput.value.trim(),
@@ -70,20 +115,44 @@ function addUnit(event) {
     memo: memoInput.value.trim()
   };
 
-  units.push(unit);
-  saveUnits();
-  resetForm();
-  render();
+  try {
+    if (appMode === "cloud") {
+      await addDoc(getUnitsCollection(), {
+        ...unit,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+    } else {
+      units.push({
+        id: Date.now().toString(),
+        ...unit
+      });
+      saveUnits();
+      render();
+    }
+
+    resetForm();
+  } catch (error) {
+    alert("登録に失敗しました。通信状態やFirebase設定を確認してください。");
+  }
 }
 
-function deleteUnit(id) {
+async function deleteUnit(id) {
   if (!confirm("この単元を削除しますか？")) {
     return;
   }
 
-  units = units.filter((unit) => unit.id !== id);
-  saveUnits();
-  render();
+  try {
+    if (appMode === "cloud") {
+      await deleteDoc(doc(getUnitsCollection(), id));
+    } else {
+      units = units.filter((unit) => unit.id !== id);
+      saveUnits();
+      render();
+    }
+  } catch (error) {
+    alert("削除に失敗しました。通信状態やFirebase設定を確認してください。");
+  }
 }
 
 function toggleReviewFilter() {
@@ -243,7 +312,7 @@ function importJsonBackup(event) {
 
   const reader = new FileReader();
 
-  reader.onload = () => {
+  reader.onload = async () => {
     try {
       const parsedData = JSON.parse(reader.result);
       const importedUnits = normalizeImportedUnits(parsedData);
@@ -253,25 +322,74 @@ function importJsonBackup(event) {
         return;
       }
 
-      if (importMode === "replace") {
-        if (!confirm("現在のデータをすべて置き換えますか？")) {
-          return;
-        }
+      const saved = await saveImportedUnits(importedUnits);
 
-        units = importedUnits;
-      } else {
-        units = [...units, ...importedUnits];
+      if (saved) {
+        alert(`${importedUnits.length}件の単元データを読み込みました。`);
       }
-
-      saveUnits();
-      render();
-      alert(`${importedUnits.length}件の単元データを読み込みました。`);
     } catch (error) {
       alert("JSONファイルを読み込めませんでした。ファイルを確認してください。");
     }
   };
 
   reader.readAsText(file);
+}
+
+async function saveImportedUnits(importedUnits) {
+  if (appMode === "cloud") {
+    if (importMode === "replace") {
+      if (!confirm("クラウド上の現在のデータをすべて置き換えますか？")) {
+        return false;
+      }
+
+      const currentDocs = await getDocs(getUnitsCollection());
+      await Promise.all(currentDocs.docs.map((unitDoc) => deleteDoc(unitDoc.ref)));
+    }
+
+    const cloudUnits = await getDocs(getUnitsCollection());
+    const existingKeys = new Set(cloudUnits.docs.map((unitDoc) => createUnitKey(unitDoc.data())));
+
+    for (const unit of importedUnits) {
+      const key = createUnitKey(unit);
+
+      if (importMode === "add" && existingKeys.has(key)) {
+        continue;
+      }
+
+      await addDoc(getUnitsCollection(), {
+        date: unit.date,
+        subject: unit.subject,
+        unitName: unit.unitName,
+        status: unit.status,
+        understanding: clampUnderstanding(unit.understanding),
+        memo: unit.memo || "",
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+
+      existingKeys.add(key);
+    }
+
+    return true;
+  }
+
+  if (importMode === "replace") {
+    if (!confirm("現在のデータをすべて置き換えますか？")) {
+      return false;
+    }
+
+    units = importedUnits;
+  } else {
+    const existingKeys = new Set(units.map(createUnitKey));
+    units = [
+      ...units,
+      ...importedUnits.filter((unit) => !existingKeys.has(createUnitKey(unit)))
+    ];
+  }
+
+  saveUnits();
+  render();
+  return true;
 }
 
 function normalizeImportedUnits(parsedData) {
@@ -331,6 +449,9 @@ function escapeCsv(value) {
 }
 
 form.addEventListener("submit", addUnit);
+loginForm.addEventListener("submit", loginToFirebase);
+logoutButton.addEventListener("click", logoutFromFirebase);
+uploadLocalButton.addEventListener("click", uploadLocalUnitsToCloud);
 reviewFilterButton.addEventListener("click", toggleReviewFilter);
 csvButton.addEventListener("click", exportCsv);
 backupButton.addEventListener("click", exportJsonBackup);
@@ -339,4 +460,168 @@ importReplaceButton.addEventListener("click", () => startImport("replace"));
 importFileInput.addEventListener("change", importJsonBackup);
 
 resetForm();
-render();
+startApp();
+
+function startApp() {
+  if (!firebaseReady) {
+    setLocalMode("Firebase未設定: ローカル保存");
+    render();
+    return;
+  }
+
+  try {
+    const firebaseApp = initializeApp(firebaseConfig);
+    auth = getAuth(firebaseApp);
+    db = getFirestore(firebaseApp);
+
+    onAuthStateChanged(auth, (user) => {
+      currentUser = user;
+
+      if (user) {
+        startCloudSync();
+      } else {
+        stopCloudSync();
+        setLocalMode("未ログイン: ローカル保存");
+        render();
+      }
+    });
+  } catch (error) {
+    setLocalMode("Firebase設定エラー");
+    render();
+  }
+}
+
+function setLocalMode(message) {
+  appMode = "local";
+  syncStatus.textContent = message;
+  loginButton.disabled = !firebaseReady;
+  logoutButton.disabled = true;
+  uploadLocalButton.disabled = true;
+}
+
+function setCloudMode(message) {
+  appMode = "cloud";
+  syncStatus.textContent = message;
+  loginButton.disabled = true;
+  logoutButton.disabled = false;
+  uploadLocalButton.disabled = false;
+}
+
+async function loginToFirebase(event) {
+  event.preventDefault();
+
+  if (!firebaseReady) {
+    alert("Firebase設定がまだ入っていません。");
+    return;
+  }
+
+  try {
+    await signInWithEmailAndPassword(auth, emailInput.value.trim(), passwordInput.value);
+    passwordInput.value = "";
+  } catch (error) {
+    alert("ログインできませんでした。メールアドレスとパスワードを確認してください。");
+  }
+}
+
+async function logoutFromFirebase() {
+  if (!auth) {
+    return;
+  }
+
+  await signOut(auth);
+}
+
+function startCloudSync() {
+  stopCloudSync();
+  localUnitsBeforeCloud = loadUnits();
+  setCloudMode("クラウド同期中");
+
+  const unitsQuery = query(getUnitsCollection(), orderBy("date", "desc"));
+
+  unsubscribeUnits = onSnapshot(unitsQuery, (snapshot) => {
+    units = snapshot.docs.map((unitDoc) => ({
+      id: unitDoc.id,
+      ...unitDoc.data()
+    }));
+
+    saveUnits();
+    render();
+  }, () => {
+    setLocalMode("同期エラー: ローカル保存");
+    render();
+  });
+}
+
+function stopCloudSync() {
+  if (unsubscribeUnits) {
+    unsubscribeUnits();
+    unsubscribeUnits = null;
+  }
+}
+
+function getUnitsCollection() {
+  return collection(db, "families", FAMILY_ID, "units");
+}
+
+async function uploadLocalUnitsToCloud() {
+  if (appMode !== "cloud") {
+    alert("クラウドへ送るにはログインしてください。");
+    return;
+  }
+
+  const localUnits = localUnitsBeforeCloud;
+
+  if (localUnits.length === 0) {
+    alert("送信するローカルデータがありません。");
+    return;
+  }
+
+  if (!confirm(`${localUnits.length}件のローカルデータをクラウドへ追加しますか？`)) {
+    return;
+  }
+
+  const cloudUnits = await getDocs(getUnitsCollection());
+  const existingKeys = new Set(cloudUnits.docs.map((unitDoc) => {
+    const unit = unitDoc.data();
+    return createUnitKey(unit);
+  }));
+
+  let addedCount = 0;
+
+  for (const unit of localUnits) {
+    const key = createUnitKey(unit);
+
+    if (existingKeys.has(key)) {
+      continue;
+    }
+
+    await addDoc(getUnitsCollection(), {
+      date: unit.date,
+      subject: unit.subject,
+      unitName: unit.unitName,
+      status: unit.status,
+      understanding: clampUnderstanding(unit.understanding),
+      memo: unit.memo || "",
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+
+    existingKeys.add(key);
+    addedCount += 1;
+  }
+
+  alert(`${addedCount}件をクラウドへ追加しました。`);
+}
+
+function createUnitKey(unit) {
+  return [
+    unit.date,
+    unit.subject,
+    unit.unitName,
+    unit.status,
+    unit.understanding,
+    unit.memo || ""
+  ].join("__");
+}
+
+window.deleteUnit = deleteUnit;
