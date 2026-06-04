@@ -15,6 +15,32 @@
     </header>
 
     <section class="panel">
+      <div class="panel-title">
+        <h2>クラウド同期</h2>
+        <span id="syncStatus" class="count-badge">確認中</span>
+      </div>
+      <p class="panel-note">Firebase設定後は、同じアカウントでログインしたPC・スマホのデータが同期されます。</p>
+
+      <form id="loginForm" class="login-form">
+        <label>
+          メールアドレス
+          <input id="emailInput" type="email" autocomplete="email" placeholder="例：sample@example.com">
+        </label>
+
+        <label>
+          パスワード
+          <input id="passwordInput" type="password" autocomplete="current-password" placeholder="Firebaseで作成したパスワード">
+        </label>
+
+        <div class="button-row wide">
+          <button id="loginButton" class="primary-button compact-button" type="submit">ログイン</button>
+          <button id="logoutButton" class="secondary-button" type="button">ログアウト</button>
+          <button id="uploadLocalButton" class="secondary-button" type="button">ローカルデータをクラウドへ送る</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="panel">
       <h2>単元を登録</h2>
 
       <form id="unitForm" class="form">
@@ -96,6 +122,6 @@
     </section>
   </main>
 
-  <script src="app.js"></script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>
